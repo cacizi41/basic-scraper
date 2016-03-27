@@ -1,15 +1,14 @@
-from lxml import html
 import requests
+import io
 from bs4 import BeautifulSoup
 import sys
+# import html5lib
+import re
 
 
-# r = requests.get('http://info.kingcounty.gov/health/ehs/foodsafety/inspections/Results.aspx?Output=W&Business_Name=&Business_Address=&Longitude=&Latitude=&City=&Zip_Code=98102&Inspection_Type=All&Inspection_Start=3/1/2015&Inspection_End=3/1/2016&Inspection_Closed_Business=A&Violation_Points=&Violation_Red_Points=&Violation_Descr=&Fuzzy_Search=N&Sort=H')
-
-
-INSPECTION_DOMAIN = 'http://info.kingcounty.gov'
-INSPECTION_PATH = '/health/ehs/foodsafety/inspections/Results.aspx'
-INSPECTION_PARAMS = {
+DOMAIN = 'http://info.kingcounty.gov'
+PATH = '/health/ehs/foodsafety/inspections/Results.aspx'
+PARAMS = {
     'Output': 'W',
     'Business_Name': '',
     'Business_Address': '',
@@ -28,43 +27,147 @@ INSPECTION_PARAMS = {
     'Sort': 'H'
 }
 
+
 def get_inspection_page(**kwargs):
-    url = INSPECTION_DOMAIN + INSPECTION_PATH
-    payload = INSPECTION_PARAMS.copy()
+    """Get data and encoding from web page."""
+    url = DOMAIN + PATH
+    params = PARAMS.copy()
     for key, val in kwargs.items():
-        if key in INSPECTION_PARAMS:
+        if key in PARAMS:
             params[key] = val
-    req = requests.get(url, params=payload)
+    req = requests.get(url, params=params)
     req.raise_for_status()
+    write_inspection_page('inspection_page.html', req.content)
     return req.content, req.encoding
-    # It must accept keyword arguments for the possible query parameters
-    # It will build a dictionary of request query parameters from incoming keywords
-    # It will make a request to the King County server using this query
-    # It will return the bytes content of the response and the encoding if there is no error
-    # It will raise an error if there is a problem with the response
 
 
-def load_inspection_page():
-    url = INSPECTION_DOMAIN + INSPECTION_PATH
-    payload = INSPECTION_PARAMS.copy()
-    page = requests.get(url, params=payload)
-    inspection_page_html = html.fromstring(page.content)
-    print inspection_page_html
+def write_inspection_page(file, data):
+    """Write data into file."""
+    with io.open(file, 'wb') as file:
+        file.write(data)
+
+
+def load_inspection_page(file):
+    """Read file."""
+    with io.open(file, 'rb') as file:
+        return file.read()
 
 
 def parse_source(html, encoding='utf-8'):
-    parsed = BeautifulSoup(inspection_page_html, html5lib, from_encoding=encoding)
-    print parsed
+    """Parse html using beautiful soup."""
+    parsed = BeautifulSoup(html, 'html5lib', from_encoding=encoding)
+    return parsed
+
+
+def extract_data_listings(html):
+    """Find div sections in html."""
+    id_finder = re.compile(r'PR[\d]+~')
+    return html.find_all('div', id=id_finder)
+
+
+def has_two_tds(ele):
+    """Find table rows w two table data."""
+    is_tr = ele.name == 'tr'
+    td_children = ele.find_all('td', recursive=False)
+    has_two = len(td_children) == 2
+    return is_tr and has_two
+
+
+def clean_data(td):
+    """Clean up data, striping off unwanted characters."""
+    data = td.string
+    # print(type(data))
+    try:
+        return data.strip(" \n:-")
+    except AttributeError:
+        return u""
+
+
+def extract_restaurant_metadata(elem):
+    """Extract restaurants table data."""
+    metadata_rows = elem.find('tbody').find_all(has_two_tds, recursice=False)
+    rdata = {}
+    current_lable = ''
+    for row in metadata_rows:
+        key_cell, val_cell = row.find_all('td', recursive=False)
+        new_lable = clean_data(key_cell)
+        current_lable = new_lable if new_lable else current_lable
+        rdata.setdefault(current_lable, []).append(clean_data(val_cell))
+    return rdata
+
+
+def is_inspection_row(elem):
+    """Find rows start with inspection."""
+    is_tr = elem.name == 'tr'
+    if not is_tr:
+        return False
+    td_children = elem.find_all('td', recursive=False)
+    has_four = len(td_children) == 4
+    this_text = clean_data(td_children[0]).lower()
+    contains_word = 'inspection' in this_text
+    does_not_start = not this_text.startswith('inspection')
+    return is_tr and has_four and contains_word and does_not_start
+
+def extract_score_data(elem):
+    """Extract inspection score data."""
+    inspection_rows = elem.find_all(is_inspection_row)
+    samples = len(inspection_rows)
+    total = high_score = average = 0
+    for row in inspection_rows:
+        str_val = clean_data(row.find_all('td')[2])
+        try:
+            int_val = int(str_val)
+        except(ValueError, TypeError):
+            samples -= 1
+        else:
+            total += int_val
+        high_score = int_val if int_val > high_score else high_score
+    if samples:
+        average = total/float(samples)
+    data = {
+        u'Average Score': average,
+        u'high_score': high_score,
+        u'Total Inspections': samples
+    }
+    return data
 
 
 if __name__ == '__main__':
     kwargs = {
-        'Inspection_Start': '3/1/15',
-        'Inspection_End': '9/1/15',
-        'Zip_Code': 98102
+        'Inspection_Start': '2/1/2013',
+        'Inspection_End': '2/1/2015',
+        'Zip_Code': '98109'
     }
-    # if len(sys.argv) > 1 and sys.argv[1] == 'test'
-    #     inspection_page_html, encoding = load_inspection_page()
-    # else:
-    #     inspection_page_html, encoding = get_inspection_page(**kwargs)
-
+    if len(sys.argv) > 1 and sys.argv[1] == 'test':
+        html = load_inspection_page('inspection_page.html')
+        doc = parse_source(html)
+        encoding = 'utf-8'
+    else:
+        html, encoding = get_inspection_page(**kwargs)
+        doc = parse_source(html, encoding)
+    # print(doc)
+    print(doc.prettify(encoding))
+    listings = extract_data_listings(doc)
+    # print len(listings)
+    print listings[0].prettify()
+    for listing in listings[:5]:
+        metadata_rows = listing.find('tbody').find_all(has_two_tds, recursive=False)
+        print len(metadata_rows)
+        for row in metadata_rows:
+            for td in row.find_all('td', recursive=False):
+                # print type(td)
+                print repr(clean_data(td))
+            print
+        print
+    for listing in listings[:5]:
+        metadata = extract_restaurant_metadata(listing)
+        print metadata
+    for listing in listings[:5]:
+        metadata = extract_restaurant_metadata(listing)
+        inspection_rows = listing.find_all(is_inspection_row)
+        for row in inspection_rows:
+            print row.text
+    for listing in listings[:5]:
+        metadata = extract_score_data(listing)
+        score_data = extract_score_data(listing)
+        print score_data
