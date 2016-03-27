@@ -2,8 +2,11 @@ import requests
 import io
 from bs4 import BeautifulSoup
 import sys
-# import html5lib
+import geocoder
 import re
+import json
+from pprint import pprint
+import lxml
 
 
 DOMAIN = 'http://info.kingcounty.gov'
@@ -108,6 +111,7 @@ def is_inspection_row(elem):
     does_not_start = not this_text.startswith('inspection')
     return is_tr and has_four and contains_word and does_not_start
 
+
 def extract_score_data(elem):
     """Extract inspection score data."""
     inspection_rows = elem.find_all(is_inspection_row)
@@ -132,42 +136,57 @@ def extract_score_data(elem):
     return data
 
 
-if __name__ == '__main__':
+def generate_results(test=False, count=10):
     kwargs = {
         'Inspection_Start': '2/1/2013',
         'Inspection_End': '2/1/2015',
         'Zip_Code': '98109'
     }
-    if len(sys.argv) > 1 and sys.argv[1] == 'test':
+    if test:
         html = load_inspection_page('inspection_page.html')
         doc = parse_source(html)
         encoding = 'utf-8'
     else:
         html, encoding = get_inspection_page(**kwargs)
         doc = parse_source(html, encoding)
-    # print(doc)
-    print(doc.prettify(encoding))
     listings = extract_data_listings(doc)
-    # print len(listings)
-    print listings[0].prettify()
-    for listing in listings[:5]:
-        metadata_rows = listing.find('tbody').find_all(has_two_tds, recursive=False)
-        print len(metadata_rows)
-        for row in metadata_rows:
-            for td in row.find_all('td', recursive=False):
-                # print type(td)
-                print repr(clean_data(td))
-            print
-        print
-    for listing in listings[:5]:
+    for listing in listings[:count]:
         metadata = extract_restaurant_metadata(listing)
-        print metadata
-    for listing in listings[:5]:
-        metadata = extract_restaurant_metadata(listing)
-        inspection_rows = listing.find_all(is_inspection_row)
-        for row in inspection_rows:
-            print row.text
-    for listing in listings[:5]:
-        metadata = extract_score_data(listing)
         score_data = extract_score_data(listing)
-        print score_data
+        metadata.update(score_data)
+        yield metadata
+        # print(metadata)
+
+
+def get_geojson(result):
+    address = " ".join(result.get('Address', ''))
+    if not address:
+        return None
+    geocoded = geocoder.google(address)
+    geojson = geocoded.geojson
+    inspection_data = {}
+    useful_keys = (
+        'Business Name', 'Average Score', 'Total Inspections', 'High Score', 'Address',
+    )
+    for key, val in result.items():
+        if key not in useful_keys:
+            continue
+        if isinstance(val, list):
+            val = " ".join(val)
+        inspection_data[key] = val
+    new_address = geojson['properties'].get('address')
+    if new_address:
+        inspection_data['Address'] = new_address
+    geojson['properties'] = inspection_data
+    return geojson
+
+
+if __name__ == '__main__':
+    test = len(sys.argv) > 1 and sys.argv[1] == 'test'
+    total_result = {'type': 'Featurecollection', 'features': []}
+    for result in generate_results(test):
+        geo_result = get_geojson(result)
+        pprint(geo_result)
+        total_result['features'].append(geo_result)
+    with open('restaurants_map.json', 'w') as fh:
+        json.dump(total_result, fh)
